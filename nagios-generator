@@ -1,0 +1,225 @@
+#!/usr/bin/python
+
+"""nagios-generator
+
+Reads in a pseudo-configuration script and writes out Nagios configuration files
+based on that content.  This makes generating configurations much easier and
+less error prone.  It also saves a little sanity, which is something that we
+operations people always need.
+
+Written by Mark Smith <mark@qq.is>.
+
+Copyright 2011 by Bump Technologies, Inc.
+
+"""
+
+
+import datetime
+import os
+import re
+import sys
+from optparse import OptionParser
+
+
+def main(argv):
+    """Main generator for Nagios configurations.
+
+    """
+    parser = OptionParser(description='Creates Nagios configuration files.')
+    parser.add_option('-d', '--dest-file', dest='ofile', metavar='FILE',
+            default='/etc/nagios3/conf.d/auto', help='File to write the '
+            'the generated output to.')
+    parser.add_option('-c', '--config-file', dest='conf', metavar='FILE',
+            default='/etc/nagios3/auto/default.cfg', help='The file to use as '
+            'input to the config generator.')
+    parser.add_option('-s', '--sources-file', dest='source', metavar='FILE',
+            default='/etc/nagios3/auto/sources.cfg', help='The file that contains '
+            'the sources referenced in the config file.')
+    (options, args) = parser.parse_args(args=argv[1:])
+
+    if not os.path.isfile(options.conf):
+        parser.error("Configuration file not found: %s" % options.conf)
+    if not os.path.isfile(options.source):
+        parser.error("Source file not found: %s" % options.source)
+
+    src = parse_sources(options.source)
+    if src is None:
+        parser.error("Failed parsing source file.  Please check the formatting.")
+    conf = parse_config(options.conf, src)
+    if conf is None:
+        parser.error("Failed parsing configuration file.  Please check the formatting.")
+    write_output_file(src, conf, options.ofile)
+
+
+def fatal(msg):
+    """Fatal error.  Print a message and then bail with an error code.
+
+    """
+    print msg
+    sys.exit(1)
+
+
+def parse_sources(src):
+    """Given a filename, parse it as the sources.  We use this file to tell us what
+    Nagios stanzas to use when they are referenced.  The sources file needs to
+    consist of the following format:
+
+    $redis
+    define service {
+        host                 $1
+        service_description  $2
+    }
+
+    $riak
+    define service {
+        host                 $1
+        other stuff          $2
+    }
+
+    """
+    try:
+        sf = open(src, "r")
+        lines = sf.readlines()
+        sf.close()
+    except IOError:
+        return None
+
+    cursource = None
+    sources = {}
+    for line in lines:
+        line = line.rstrip()
+        if line.startswith('$'):
+            cursource = line[1:]
+            if cursource not in sources:
+                sources[cursource] = ''
+            continue
+        if cursource is None:
+            continue
+        sources[cursource] += line + '\n'
+    return sources
+
+
+def parse_config(conf, sources):
+    """Parse the given configuration file.  This is a very simple format that specifies
+    what hosts to monitor and which sources to assign to each host.  The configuration
+    file format is like this:
+
+    @group $thing1, $thing2
+
+    host @group, $thing3
+    host $thing3 arg arg arg
+
+    See the example configuration files.
+
+    """
+    try:
+        sf = open(conf, "r")
+        lines = sf.readlines()
+        sf.close()
+    except IOError:
+        return None
+
+    groups = {}
+    hosts = {}
+    has_error = False
+    for line in lines:
+        line = line.strip()
+        if len(line) <= 0 or line.startswith('#'):
+            continue
+        if line.startswith('@'):
+            group, c = line[1:].split(' ', 1)
+            contents = [j.strip() for j in c.split(',')]
+            if group not in groups:
+                groups[group] = []
+
+            # Validate that this item exists as a source.
+            for sourceline in contents:
+                source, args = parse_source_line(sourceline)
+                groups[group].append((source, args))
+        else:  # Regular host.
+            hostname, c = line.split(' ', 1)
+            if hostname not in hosts:
+                hosts[hostname] = []
+                if 'default' in groups:
+                    for pair in groups['default']:
+                        hosts[hostname].append((pair[0], [hostname]+pair[1]))
+            contents = [j.strip() for j in c.split(',')]
+
+            # Now validate the sources and put them on the host.
+            for sourceline in contents:
+                if sourceline.startswith('@'):
+                    group = sourceline[1:]
+                    if group not in groups:
+                        print "Group %s not found for host %s." % (group, hostname)
+                        has_error = True
+                        continue
+                    for pair in groups[group]:
+                        hosts[hostname].append((pair[0], [hostname]+pair[1]))
+                    continue
+                source, args = parse_source_line(sourceline)
+                if source in sources:
+                    hosts[hostname].append((source, [hostname]+args))
+                    continue
+                has_error = True
+                print "Error with host %s, source %s." % (hostname, source)
+
+    # If any error, we don't want to actually continue and do anything.
+    return None if has_error else hosts
+
+
+def parse_source_line(sl):
+    """Given a source line like '$redis arg1 "arg2 is a string" arg3', parse it
+    and return the source name and the arguments in a list.  We only support
+    double quotes and spaces.  No tabs or single quotes.
+
+    """
+    quoted = False
+    spaced = True
+    args = []
+    for char in sl:
+        if char == '"':
+            if spaced and not quoted:
+                args.append('')
+            quoted = not quoted
+            spaced = False
+        elif char == ' ':
+            if quoted:
+                args[-1] += char
+                continue
+            spaced = True
+        else:
+            if spaced:
+                args.append('')
+            args[-1] += char
+            spaced = False
+    if not args[0].startswith('$'):
+        print "Source configuration [%s] invalid." % sl
+        return None, None
+    return args[0][1:], args[1:]
+
+
+def write_output_file(src, conf, ofile):
+    """Write stuff.  We actually write everything to one large automatic file.
+
+    """
+    try:
+        f = open(ofile, "w")
+        f.write('# automatically generated by gen-nagios-conf at %s\n' %
+                str(datetime.datetime.now()))
+        f.write('# DO NOT EDIT THIS MANUALLY, YOUR CHANGES WILL BE LOST\n\n')
+    except IOError:
+        fatal("Failed to open output file.")
+
+    for hostname in sorted(conf):
+        for pair in conf[hostname]:
+            source, args = pair
+            text = src[source]
+            for i in range(0, len(args)):
+                text = re.sub(r'\$%d' % (i+1), args[i], text)
+            f.write(text + '\n')
+
+    f.close()
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

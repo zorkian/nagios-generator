@@ -1,0 +1,21 @@
+nagios-generator
+
+This is an automated Nagios configuration file generator.  It's only designed to
+generate service configurations, although you can technically use it to generate
+anything that is stanza based, probably.
+
+Usage is fairly straightforward.  Look at the two conf files in this repository
+to see how it works.  In short, you give it a sources file (containing in essence
+the service declarations you want) and then a config file that contains the
+hostnames and services you want to monitor on them.
+
+This is not a good replacement for hostgroup based monitoring, since that is
+simple and easy to manage.  This is, however, great if you either don't care
+about using Nagios hostgroup implementation or if your services all vary enough
+that you are getting tired of messing with Nagios configs.
+
+To demonstrate from this folder:
+
+    ./nagios-generator -c example.conf -s sources.conf -d output
+
+Written by Mark Smith <mark@qq.is> and copyright by Bump Technologies, Inc.
